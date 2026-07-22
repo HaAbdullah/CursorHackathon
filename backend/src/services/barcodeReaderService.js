@@ -1,5 +1,5 @@
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-const MODEL = process.env.OPENROUTER_VISION_MODEL || "openai/gpt-4o-mini";
+const MODEL = process.env.OPENROUTER_VISION_MODEL || "anthropic/claude-sonnet-4.5";
 
 const SYSTEM_PROMPT = `You read barcode numbers from photos. The photo shows a product barcode (UPC/EAN), usually with the digits printed below the bars.
 

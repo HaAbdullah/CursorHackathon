@@ -1,5 +1,5 @@
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-const MODEL = process.env.OPENROUTER_TEXT_MODEL || "openai/gpt-4o-mini";
+const MODEL = process.env.OPENROUTER_TEXT_MODEL || "anthropic/claude-sonnet-4.5";
 
 // This is the core trust promise of the product: never round a shaky guess
 // up to "safe". Thresholds also differ between pregnancy and breastfeeding,

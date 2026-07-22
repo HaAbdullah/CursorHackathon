@@ -1,5 +1,5 @@
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-const MODEL = process.env.OPENROUTER_VISION_MODEL || "openai/gpt-4o-mini";
+const MODEL = process.env.OPENROUTER_VISION_MODEL || "anthropic/claude-sonnet-4.5";
 
 // Pregnancy-safety verdicts depend on the exact ingredients printed on this
 // specific product. The model must transcribe what it can see in the photo,

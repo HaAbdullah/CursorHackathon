@@ -1,7 +1,7 @@
 import { lookupIngredientsSafety } from "./ingredientSafetyLookupService.js";
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-const MODEL = process.env.OPENROUTER_TEXT_MODEL || "openai/gpt-4o-mini";
+const MODEL = process.env.OPENROUTER_TEXT_MODEL || "anthropic/claude-sonnet-4.5";
 
 const SEVERITY_ORDER = { avoid: 3, caution: 2, insufficient_data: 1, likely_safe: 0 };
 

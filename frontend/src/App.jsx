@@ -1,56 +1,59 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import ScanView from "./components/ScanView.jsx";
+import VerdictView from "./components/VerdictView.jsx";
+import { scanProduct } from "./lib/api.js";
 
 export default function App() {
-  const [items, setItems] = useState([]);
-  const [name, setName] = useState("");
-  const [status, setStatus] = useState("checking backend...");
+  const [stage, setStage] = useState("t1");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState(null);
+  const [lastBarcode, setLastBarcode] = useState("");
 
-  useEffect(() => {
-    fetch("/api/health")
-      .then((r) => r.json())
-      .then(() => setStatus("backend connected"))
-      .catch(() => setStatus("backend not reachable"));
-    loadItems();
-  }, []);
-
-  function loadItems() {
-    fetch("/api/items")
-      .then((r) => r.json())
-      .then(setItems)
-      .catch(() => {});
+  async function runScan(barcode, nextStage = stage) {
+    setBusy(true);
+    setError("");
+    try {
+      const data = await scanProduct({ barcode, stage: nextStage });
+      setLastBarcode(barcode);
+      setResult(data);
+    } catch (err) {
+      setError(err?.message || "Scan failed. Try again.");
+    } finally {
+      setBusy(false);
+    }
   }
 
-  async function addItem(e) {
-    e.preventDefault();
-    if (!name.trim()) return;
-    await fetch("/api/items", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name }),
-    });
-    setName("");
-    loadItems();
+  async function handleStageChangeFromVerdict(nextStage) {
+    setStage(nextStage);
+    if (lastBarcode) {
+      await runScan(lastBarcode, nextStage);
+    }
   }
 
   return (
-    <div style={{ fontFamily: "sans-serif", maxWidth: 480, margin: "40px auto" }}>
-      <h1>CursorHackathon</h1>
-      <p>Status: {status}</p>
-
-      <form onSubmit={addItem} style={{ display: "flex", gap: 8 }}>
-        <input
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="New item"
-        />
-        <button type="submit">Add</button>
-      </form>
-
-      <ul>
-        {items.map((item) => (
-          <li key={item.id}>{item.name}</li>
-        ))}
-      </ul>
+    <div className="app-shell">
+      <div className="app-atmosphere" aria-hidden="true" />
+      <main className="app-main">
+        {result ? (
+          <VerdictView
+            result={result}
+            onRescan={() => {
+              setResult(null);
+              setError("");
+            }}
+            onStageChange={handleStageChangeFromVerdict}
+          />
+        ) : (
+          <ScanView
+            stage={stage}
+            onStageChange={setStage}
+            onScan={runScan}
+            busy={busy}
+          />
+        )}
+        {error ? <p className="app-error">{error}</p> : null}
+      </main>
     </div>
   );
 }

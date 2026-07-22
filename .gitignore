@@ -6,3 +6,9 @@ build/
 .DS_Store
 database/*.sqlite
 database/*.db
+__pycache__/
+*.pyc
+safescan.db
+safescan.db-shm
+safescan.db-wal
+.venv/

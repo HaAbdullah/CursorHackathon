@@ -1,0 +1,343 @@
+# CODING AGENT PROMPT — AHMED (API + database + matching + reports)
+
+You are building the API/data half of **SafeScan**, a hackathon backend that scans product photos or barcodes and flags ingredients unsafe during pregnancy, personalized to the user's health profile. A teammate (Abdullah) is building the LLM half in the same repo with his own coding agent, from a prompt containing the exact same SHARED CONTRACT section below.
+
+## Your lane
+You create and own: `app/main.py`, `app/db.py`, `app/schema.sql`, `app/seed.py`, `app/matching.py`, `app/report.py`, `app/off.py`.
+You NEVER create or modify: `app/llm.py`, `app/extract.py`, `app/research.py` — those are Abdullah's. You import from them using the exact signatures in the SHARED CONTRACT.
+Exception: if `app/extract.py` or `app/research.py` do not exist yet when you need to run, generate placeholder versions containing ONLY the FAKE_LLM fixture behavior with the exact frozen signatures, with this as the first line: `# PLACEHOLDER — Abdullah's agent overwrites this file. Do not edit.` Never touch them again once real versions exist.
+`app/models.py` is shared and FROZEN: create it verbatim from the SHARED CONTRACT if missing, never alter it.
+
+---
+
+# SHARED CONTRACT — IDENTICAL IN BOTH PROMPTS. NEVER MODIFY ANYTHING IN THIS SECTION.
+
+## Stack
+
+Python 3.11+, FastAPI, SQLite. `requirements.txt`:
+
+```
+fastapi
+uvicorn[standard]
+openai
+httpx
+pydantic
+python-multipart
+python-dotenv
+```
+
+Run with `uvicorn app.main:app --reload --port 8000`. No auth, no Celery/Redis/queues, no websockets, no Docker, no migrations tooling. Background work uses FastAPI `BackgroundTasks`; the frontend polls.
+
+## Repo layout and ownership
+
+```
+app/
+  main.py        AHMED     FastAPI app, routes, CORS, BackgroundTasks wiring
+  db.py          AHMED     sqlite connection + frozen helper functions
+  schema.sql     AHMED     verbatim from this contract
+  seed.py        AHMED     loads data/seed_ingredients.csv
+  matching.py    AHMED     normalize() + match_ingredients()
+  report.py      AHMED     build_report(), verdict rule, personalization
+  off.py         AHMED     Open Food Facts barcode lookup
+  models.py      SHARED    verbatim from this contract, never edited
+  llm.py         ABDULLAH  OpenRouter client + call_json()
+  extract.py     ABDULLAH  photo extraction + Tavily fallback extraction
+  research.py    ABDULLAH  background research of unknowns + upsert + summary
+data/
+  seed_ingredients.csv
+.env
+```
+
+## Environment (`.env`)
+
+```
+OPENROUTER_API_KEY=sk-or-...
+TAVILY_API_KEY=tvly-...
+MODEL_FAST=anthropic/claude-haiku-4.5
+MODEL_SMART=anthropic/claude-sonnet-4.5
+DB_PATH=./safescan.db
+FAKE_LLM=1
+```
+
+`MODEL_FAST` must be a vision-capable OpenRouter model. Model IDs live ONLY in env — never hardcoded elsewhere.
+
+## FAKE_LLM mode
+
+When `FAKE_LLM=1`, every function in `extract.py` and `research.py` returns canned fixtures with zero network calls. Fixtures (exact):
+- `extract_from_photos` and `extract_via_search` → `ExtractionResult(found_ingredients=True, product_name="VoltFuel berry drink", ingredients=["Carbonated water", "Sugar (27g)", "Caffeine (200mg)", "Taurine", "Ginseng extract", "Niacin", "Sucralose"])`
+- research verdict for any unknown name → `IngredientVerdict(name=<normalized name>, risk_level="caution", why="Limited safety data during pregnancy.", condition_flags={})`, produced after `asyncio.sleep(4)` so the frontend loading state is exercised.
+- summary → `"Skip this one — the caffeine alone is your full daily limit, and the sugar load matters for you."`
+
+This mode is how the API and frontend run end-to-end before real LLM calls exist, and the on-stage fallback if a key dies.
+
+## Database schema (`app/schema.sql`, verbatim)
+
+SQLite. `db.py` must execute `PRAGMA journal_mode=WAL;` and open with `check_same_thread=False` (background task writes while requests read). All timestamps are ISO 8601 UTC strings. JSON columns are TEXT holding serialized JSON.
+
+```sql
+CREATE TABLE IF NOT EXISTS ingredients (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT UNIQUE NOT NULL,
+  aliases TEXT NOT NULL DEFAULT '[]',
+  risk_level TEXT NOT NULL CHECK (risk_level IN ('avoid','caution','safe')),
+  why TEXT NOT NULL,
+  max_amount TEXT,
+  condition_flags TEXT NOT NULL DEFAULT '{}',
+  source TEXT NOT NULL DEFAULT 'seed' CHECK (source IN ('seed','agent')),
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS products (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  cache_key TEXT UNIQUE NOT NULL,
+  name TEXT,
+  barcode TEXT,
+  ingredients_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS scans (
+  id TEXT PRIMARY KEY,
+  status TEXT NOT NULL CHECK (status IN ('processing','partial','complete','failed')),
+  input_type TEXT NOT NULL CHECK (input_type IN ('barcode','photos')),
+  product_name TEXT,
+  ingredients_json TEXT NOT NULL DEFAULT '[]',
+  profile_json TEXT NOT NULL,
+  report_json TEXT,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+```
+
+Column meanings: `ingredients.name` is canonical lowercase; `ingredients.aliases` is a JSON array of lowercase strings; `ingredients.condition_flags` is a JSON object whose keys come ONLY from the Condition enum values plus `trimester_1|trimester_2|trimester_3`; `products.ingredients_json` and `scans.ingredients_json` are JSON arrays of RAW ingredient strings exactly as extracted; `products.cache_key` is the barcode if one was provided, else the sha256 hex of the lowercased product name; `scans.id` is `uuid4().hex`.
+
+Cache semantics: `products` stores only raw extracted strings — never verdicts, never personalization. A cache hit re-runs matching + personalization fresh (cheap, zero LLM calls), so cached products automatically pick up every verdict the agent has learned since.
+
+## `app/models.py` (verbatim, frozen)
+
+```python
+from enum import Enum
+from pydantic import BaseModel, Field
+from typing import Optional
+
+
+class RiskLevel(str, Enum):
+    avoid = "avoid"
+    caution = "caution"
+    safe = "safe"
+
+
+class IngredientStatus(str, Enum):
+    avoid = "avoid"
+    caution = "caution"
+    safe = "safe"
+    pending = "pending"
+
+
+class ScanStatus(str, Enum):
+    processing = "processing"
+    partial = "partial"
+    complete = "complete"
+    failed = "failed"
+
+
+class Condition(str, Enum):
+    gestational_diabetes = "gestational_diabetes"
+    hypertension = "hypertension"
+    anemia = "anemia"
+    thyroid = "thyroid"
+
+
+class Profile(BaseModel):
+    trimester: int = Field(ge=1, le=3, default=2)
+    conditions: list[Condition] = []
+    allergies: list[str] = []
+
+
+class ExtractionResult(BaseModel):
+    found_ingredients: bool
+    product_name: Optional[str] = None
+    ingredients: list[str] = []
+
+
+class IngredientVerdict(BaseModel):
+    name: str
+    aliases: list[str] = []
+    risk_level: RiskLevel
+    why: str
+    max_amount: Optional[str] = None
+    condition_flags: dict[str, str] = {}
+
+
+class MatchResult(BaseModel):
+    raw: str
+    canonical: str
+    amount: Optional[str] = None
+    verdict: Optional[IngredientVerdict] = None
+
+
+class ReportIngredient(BaseModel):
+    name: str
+    raw: str
+    status: IngredientStatus
+    why: Optional[str] = None
+    max_amount: Optional[str] = None
+    personal_note: Optional[str] = None
+    source: str
+
+
+class Report(BaseModel):
+    product_name: Optional[str]
+    verdict: str
+    summary: Optional[str] = None
+    pending_count: int = 0
+    ingredients: list[ReportIngredient] = []
+
+
+class ScanResponse(BaseModel):
+    scan_id: str
+    status: ScanStatus
+    report: Optional[Report] = None
+    error: Optional[str] = None
+```
+
+`IngredientVerdict` deliberately mirrors an `ingredients` table row one-to-one: research output, DB rows, and match results all share one shape. Never introduce a second representation.
+
+## Cross-module interface (frozen signatures — each side implements its own, imports the other's)
+
+Ahmed implements, Abdullah imports:
+
+```python
+# app/matching.py
+def normalize(raw: str) -> tuple[str, Optional[str]]: ...
+def match_ingredients(raw_list: list[str]) -> list[MatchResult]: ...
+
+# app/report.py
+def build_report(product_name: Optional[str], matches: list[MatchResult], profile: Profile) -> Report: ...
+
+# app/db.py
+def now() -> str: ...                                          # ISO 8601 UTC
+def get_scan(scan_id: str) -> Optional[dict]: ...              # row as dict of raw column values
+def update_scan(scan_id: str, **cols) -> None: ...             # sets columns + updated_at
+def insert_ingredient(v: IngredientVerdict, source: str) -> None: ...  # INSERT OR IGNORE by name
+
+# app/off.py
+async def lookup_barcode(barcode: str) -> ExtractionResult: ...
+```
+
+Abdullah implements, Ahmed imports:
+
+```python
+# app/extract.py
+async def extract_from_photos(images: list[bytes]) -> ExtractionResult: ...
+async def extract_via_search(product_name: str) -> ExtractionResult: ...
+
+# app/research.py
+async def run_research(scan_id: str) -> None: ...   # loads everything it needs from the scan row
+```
+
+## Normalization and matching rules
+
+`normalize(raw)`: 1) lowercase, strip whitespace; 2) extract an amount via regex `\(?\s*(\d+(?:\.\d+)?)\s*(mg|g|mcg|µg|ml|%)\s*\)?` into a human string like `"200 mg"` and remove it from the name; 3) strip a leading `contains`/`ingredients:` prefix and trailing punctuation; 4) return `(canonical_name, amount_or_none)`.
+
+Match rule: canonical name matches a DB row iff `canonical == row.name` or `canonical in json.loads(row.aliases)`. Exact membership only — no fuzzy matching, no embeddings.
+
+## HTTP API (the frontend contract)
+
+CORS: allow all origins, methods, headers. All responses JSON.
+
+`POST /scan` — multipart/form-data: `photos` (file, repeatable, 0–5, jpeg/png/webp), `barcode` (text, optional), `profile` (text, required — JSON string parsing as `Profile`). At least one of photos/barcode else HTTP 400 `{"detail": "provide photos or barcode"}`; bad profile → HTTP 400 `{"detail": "invalid profile"}`. Runs the synchronous path (lookup/extraction + matching), schedules background research if unknowns exist, responds:
+
+```json
+{ "scan_id": "9f3c2ab04e2d4d1b8f0a7c5e6d4b3a21", "status": "partial", "report": { ... } }
+```
+
+`status` is `complete` (no unknowns, or cache hit), `partial` (research running), or `failed` (nothing usable extracted — `report` null, `error` set). Extraction failure is HTTP 200 with `status:"failed"`, never a 5xx.
+
+`GET /scan/{scan_id}` → `{"scan_id", "status", "report", "error"}`; unknown id → 404. Frontend polls every 2s while `partial`.
+
+`GET /health` → `{"ok": true, "fake_llm": <bool>}`.
+
+Report shape example:
+
+```json
+{
+  "product_name": "VoltFuel berry drink",
+  "verdict": "avoid",
+  "summary": "With gestational diabetes, this drink's sugar and caffeine load make it one to skip.",
+  "pending_count": 0,
+  "ingredients": [
+    { "name": "caffeine", "raw": "Caffeine (200mg)", "status": "avoid",
+      "why": "One serving hits the full recommended daily pregnancy limit.",
+      "max_amount": "200 mg/day", "personal_note": null, "source": "database" },
+    { "name": "taurine", "raw": "Taurine", "status": "caution",
+      "why": "Limited safety data at energy-drink doses during pregnancy.",
+      "max_amount": null, "personal_note": null, "source": "agent" }
+  ]
+}
+```
+
+Field rules, no exceptions:
+- `verdict` = worst ingredient status with order avoid > caution > safe, computed over non-pending ingredients only; if ALL are pending, `verdict` is `"pending"`.
+- `summary` is null until scan status is `complete`.
+- `pending_count` = count of ingredients with status `pending`; zero when complete.
+- `ingredients[].source` ∈ `database` (matched an existing row), `agent` (researched during this scan), `pending` (still researching).
+- `ingredients[].personal_note` = the matched row's `condition_flags[c]` for every condition `c` in the profile, plus the `trimester_{n}` key if present, joined with `"; "`; null if no overlap.
+- `ingredients[].raw` preserves the extracted string exactly.
+
+## Integration checkpoints
+
+Hour 0: commit `models.py` + `schema.sql` verbatim, `.env` with `FAKE_LLM=1`. Checkpoint 1 (no API keys needed):
+
+```bash
+curl -s -X POST localhost:8000/scan \
+  -F 'barcode=737628064502' \
+  -F 'profile={"trimester":2,"conditions":["gestational_diabetes"],"allergies":[]}'
+# expect scan_id + status partial + report with pending_count > 0
+curl -s localhost:8000/scan/<scan_id>
+# expect after ~4s: status complete, summary non-null, pending_count 0
+```
+
+Checkpoint 2: `FAKE_LLM=0`, real keys, real photo, same sequence; verify `sqlite3 safescan.db "SELECT name, risk_level, source FROM ingredients WHERE source='agent';"` shows new rows. Checkpoint 3: scan the same product twice — second POST returns `complete` instantly from cache.
+
+# END SHARED CONTRACT
+
+---
+
+## YOUR TASKS (Ahmed)
+
+### T1 — Skeleton and DB
+`main.py`: FastAPI app, CORS middleware (allow all), `GET /health` per contract, startup hook that executes `schema.sql`. `db.py`: module-level sqlite3 connection using `DB_PATH`, `PRAGMA journal_mode=WAL`, `row_factory = sqlite3.Row`, `check_same_thread=False`, plus the four frozen helpers (`now`, `get_scan`, `update_scan`, `insert_ingredient`) with exactly the frozen signatures. `update_scan` must always refresh `updated_at`. `insert_ingredient` serializes `aliases` and `condition_flags` to JSON and uses `INSERT OR IGNORE`.
+Done when: `curl localhost:8000/health` returns `{"ok": true, "fake_llm": true}`.
+
+### T2 — Seed loader
+`seed.py`, runnable as `python -m app.seed`: reads `data/seed_ingredients.csv` with header `name,aliases,risk_level,why,max_amount,condition_flags` where `aliases` and `condition_flags` cells contain JSON strings. Insert via `db.insert_ingredient` with `source='seed'`. If the CSV is missing, print a warning and exit 0 — never crash the pipeline over seed data.
+Done when: running it twice produces no duplicates.
+
+### T3 — Barcode path
+`off.py` per the frozen signature: GET `https://world.openfoodfacts.org/api/v2/product/{barcode}.json` via httpx, 5s timeout. On `status == 1` in the payload, take `product.product_name` and `product.ingredients_text`, split on commas and semicolons, strip empties, return `found_ingredients=True`. On miss/timeout/error, return `found_ingredients=False, product_name=None` — never raise.
+Done when: `lookup_barcode("737628064502")` returns a populated result.
+
+### T4 — Matching and reports
+`matching.py`: implement `normalize` and `match_ingredients` exactly per the contract rules. `match_ingredients` loads all ingredient rows once per call, parses each row into `IngredientVerdict`, and returns one `MatchResult` per input string (verdict None when unmatched). `report.py`: implement `build_report` applying the verdict rule, `pending_count`, and the `personal_note` rule exactly as specified; unmatched entries get `status="pending"`, `source="pending"`, `why=None`.
+Done when: a hand-built call with one known and one unknown validates as `Report` with `verdict` from the known and `pending_count == 1`.
+
+### T5 — Endpoints and orchestration
+Implement `POST /scan` and `GET /scan/{scan_id}` per the contract:
+1. Validate inputs (400s per contract). Parse profile into `Profile`.
+2. Cache check: if barcode given, `cache_key = barcode`; look up `products`. On hit, skip extraction, use the stored raw list.
+3. On miss: barcode → `off.lookup_barcode`; photos → `await extract.extract_from_photos(images)`. If `found_ingredients` is False and a `product_name` exists, try `await extract.extract_via_search(product_name)`. Still nothing → create the scan row with status `failed` and `error="could not read ingredients"`, return 200 per contract.
+4. On success: upsert the `products` row (`cache_key` = barcode or sha256 of lowercased product name), run `match_ingredients` + `build_report`, insert the scan row (id `uuid4().hex`, store the raw list in `scans.ingredients_json`, the profile in `profile_json`, the report in `report_json`).
+5. Unknowns present → status `partial`, schedule `research.run_research(scan_id)` via `BackgroundTasks`. None → status `complete` (leave `summary` null in this Ahmed-only path; Abdullah's research path owns summaries).
+6. `GET /scan/{scan_id}` reads the row and returns `ScanResponse`.
+Done when: with `FAKE_LLM=1` and zero API keys, the full Checkpoint 1 curl sequence passes, including the partial → complete transition.
+
+### T6 — stretch only if T1–T5 are green
+Importer for the Australian TGA prescribing-medicines-in-pregnancy CSV into `ingredients`: map categories D and X → `avoid`, C → `caution`, A/B1/B2/B3 → `safe`, `why` from the CSV's notes column truncated to 25 words, `source='seed'`.
+
+## Working rules for you (the agent)
+- Never edit anything inside the SHARED CONTRACT section or `models.py`.
+- Never implement Abdullah's functions beyond the explicitly permitted placeholder files, and never add logic to placeholders beyond the FAKE_LLM fixtures.
+- Prefer boring, readable code over abstractions; this is a hackathon service, not a framework.
+- After each task, run the server and verify the task's done-condition before moving on.

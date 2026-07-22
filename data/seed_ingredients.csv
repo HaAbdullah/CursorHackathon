@@ -1,0 +1,6 @@
+name,aliases,risk_level,why,max_amount,condition_flags
+caffeine,"[""coffee extract""]",avoid,One serving hits the full recommended daily pregnancy limit.,200 mg/day,"{""gestational_diabetes"": ""Caffeine may affect blood sugar control."", ""trimester_1"": ""Limit caffeine especially in first trimester.""}"
+sugar,"[""sucrose"", ""glucose"", ""fructose""]",caution,High sugar intake should be limited during pregnancy.,,"{""gestational_diabetes"": ""High sugar load matters for blood sugar control.""}"
+sucralose,"[""splenda""]",caution,Artificial sweetener with limited pregnancy safety data.,,{}
+niacin,"[""vitamin b3"", ""nicotinic acid""]",safe,Generally recognized as safe at typical food levels.,,{}
+carbonated water,"[""sparkling water"", ""carbonated water""]",safe,Safe during pregnancy.,,{}

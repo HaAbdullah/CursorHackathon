@@ -141,6 +141,11 @@ async def create_scan(
     report = build_report(product_name, matches, profile_obj)
 
     has_unknowns = report.pending_count > 0
+    # A cached product may already have had every ingredient researched. Reuse
+    # the completed research summary so cache hits return a finished report,
+    # rather than a `complete` response with a permanently empty summary.
+    if cache_hit and not has_unknowns:
+        report = report.model_copy(update={"summary": research.SUMMARY})
     status = ScanStatus.partial if has_unknowns else ScanStatus.complete
 
     scan_id = uuid.uuid4().hex

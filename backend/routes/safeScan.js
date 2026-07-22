@@ -86,9 +86,15 @@ function rank(status) {
 }
 
 async function extractFromPhotos(photos) {
-  const extracted = await Promise.all(
+  const settled = await Promise.allSettled(
     photos.map((photo) => extractIngredientsFromImage(photo.buffer, photo.mimetype)),
   );
+  const extracted = settled
+    .filter((result) => result.status === "fulfilled")
+    .map((result) => result.value);
+  if (extracted.length === 0) {
+    throw new Error("No uploaded photo could be read");
+  }
   const seen = new Set();
   const ingredients = extracted.flatMap((result) => result.ingredients).filter((ingredient) => {
     const key = ingredient.trim().toLowerCase();

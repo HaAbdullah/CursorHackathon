@@ -30,15 +30,28 @@ export async function lookupProductByBarcode(barcode) {
   }
 
   const p = data.product;
-  const ingredients = Array.isArray(p.ingredients) && p.ingredients.length > 0
-    ? p.ingredients.map((i) => i.text).filter(Boolean)
-    : splitIngredientsText(p.ingredients_text_en || p.ingredients_text || "");
+  // Open Food Facts' ingredient tree can collapse a compound seasoning to a
+  // single parent node. Prefer the complete transcribed label text so safety
+  // checks still see subingredients such as sugar or caffeine.
+  const labelText = p.ingredients_text_en || p.ingredients_text || "";
+  const ingredients = splitIngredientsText(labelText).length > 0
+    ? splitIngredientsText(labelText)
+    : flattenIngredientTree(p.ingredients || []);
 
   return {
     found: true,
     productName: p.product_name || p.generic_name || null,
     ingredients,
   };
+}
+
+function flattenIngredientTree(nodes) {
+  const ingredients = [];
+  for (const node of nodes) {
+    if (node?.text) ingredients.push(node.text);
+    if (Array.isArray(node?.ingredients)) ingredients.push(...flattenIngredientTree(node.ingredients));
+  }
+  return ingredients.filter(Boolean);
 }
 
 function splitIngredientsText(text) {

@@ -246,10 +246,21 @@ button:disabled {
 }
 
 .viewfinder__video {
-  display: block;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+  object-fit: cover;
+  background: #0f1715;
+}
+
+.viewfinder__video.is-visible {
+  position: relative;
   width: 100%;
   height: 260px;
-  object-fit: cover;
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .viewfinder__idle {
